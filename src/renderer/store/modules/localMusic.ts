@@ -37,6 +37,20 @@ function generateId(filePath: string): string {
 }
 
 /**
+ * 判断文件路径是否位于指定文件夹下
+ * 兼容尾部带分隔符的文件夹路径与 Windows/Unix 两种分隔符
+ * @param filePath 文件绝对路径
+ * @param folder 文件夹绝对路径
+ * @returns 文件是否在该文件夹（含子目录）下
+ */
+function isUnderFolder(filePath: string, folder: string): boolean {
+  if (!filePath.startsWith(folder)) return false;
+  if (folder.endsWith('/') || folder.endsWith('\\')) return true;
+  const next = filePath.charAt(folder.length);
+  return next === '/' || next === '\\';
+}
+
+/**
  * 初始化 IndexedDB 实例
  * 使用 localMusicDB 数据库，包含 local_music 表
  */
@@ -127,48 +141,54 @@ export const useLocalMusicStore = defineStore(
 
         // 磁盘上实际存在的文件路径集合（扫描时收集）
         const diskFilePaths = new Set<string>();
-        // 扫描失败的文件夹：其下的缓存条目不参与"已删除清理"，
-        // 避免移动盘/网络盘暂时不可用时整个文件夹的歌曲被误删（#713）
-        const failedFolders: string[] = [];
+        // 目录枚举失败的文件夹：其下的缓存条目不参与"已删除清理"，
+        // 避免移动盘/网络盘暂时不可用时整个文件夹的歌曲被误删（#713）。
+        // 注意只收录"枚举失败"，元数据解析/写库失败不算 —— 那时磁盘文件列表已经拿全了，
+        // 若一并跳过清理，删掉的歌曲会一直留在列表里（#713）
+        const unreadableFolders: string[] = [];
 
         // 遍历每个文件夹进行扫描
         for (const folderPath of folderPaths.value) {
+          // 1. 调用 IPC 扫描文件夹，获取文件路径与修改时间
+          let files: { path: string; modifiedTime: number }[];
           try {
-            // 1. 调用 IPC 扫描文件夹，获取文件路径与修改时间
             const result = await window.api.scanLocalMusicWithStats(folderPath);
 
             // 检查是否返回错误
             if ((result as any).error) {
               console.error(`扫描文件夹失败: ${folderPath}`, (result as any).error);
               message.error(`扫描失败: ${(result as any).error}`);
-              failedFolders.push(folderPath);
+              unreadableFolders.push(folderPath);
               continue;
             }
+            files = result.files;
+          } catch (error) {
+            console.error(`扫描文件夹出错: ${folderPath}`, error);
+            message.error(`扫描文件夹出错: ${folderPath}`);
+            unreadableFolders.push(folderPath);
+            continue;
+          }
 
-            const { files } = result;
-            scanProgress.value += files.length;
+          scanProgress.value += files.length;
 
-            // 记录磁盘上存在的文件
-            for (const file of files) {
-              diskFilePaths.add(file.path);
+          // 记录磁盘上存在的文件
+          for (const file of files) {
+            diskFilePaths.add(file.path);
+          }
+
+          // 2. 增量扫描：基于修改时间筛选需重新解析的文件
+          // 老条目（无 coverPath 字段）也视为需要重新解析，让数据自愈到统一格式
+          const parseTargets: string[] = [];
+          for (const file of files) {
+            const cached = cachedMap.get(file.path);
+            if (!cached || cached.modifiedTime !== file.modifiedTime || !('coverPath' in cached)) {
+              parseTargets.push(file.path);
             }
+          }
 
-            // 2. 增量扫描：基于修改时间筛选需重新解析的文件
-            // 老条目（无 coverPath 字段）也视为需要重新解析，让数据自愈到统一格式
-            const parseTargets: string[] = [];
-            for (const file of files) {
-              const cached = cachedMap.get(file.path);
-              if (
-                !cached ||
-                cached.modifiedTime !== file.modifiedTime ||
-                !('coverPath' in cached)
-              ) {
-                parseTargets.push(file.path);
-              }
-            }
-
-            // 3. 仅解析新增或变更文件，避免对未变更文件重复解析元数据
-            if (parseTargets.length > 0) {
+          // 3. 仅解析新增或变更文件，避免对未变更文件重复解析元数据
+          if (parseTargets.length > 0) {
+            try {
               const metas = await window.api.parseLocalMusicMetadata(parseTargets);
               for (const meta of metas) {
                 const entry: LocalMusicEntry = {
@@ -178,29 +198,25 @@ export const useLocalMusicStore = defineStore(
                 await localDB.saveData(LOCAL_MUSIC_STORE, entry);
                 cachedMap.set(entry.filePath, entry);
               }
+            } catch (error) {
+              // 解析/写库失败只影响元数据新鲜度，不影响本轮删除判定
+              console.error(`解析音乐元数据失败: ${folderPath}`, error);
+              message.error(`解析音乐元数据失败: ${folderPath}`);
             }
-          } catch (error) {
-            console.error(`扫描文件夹出错: ${folderPath}`, error);
-            message.error(`扫描文件夹出错: ${folderPath}`);
-            failedFolders.push(folderPath);
           }
         }
 
-        /** 判断文件路径是否位于某个扫描失败的文件夹下 */
-        const isUnderFailedFolder = (filePath: string): boolean =>
-          failedFolders.some((folder) => {
-            if (!filePath.startsWith(folder)) return false;
-            if (folder.endsWith('/') || folder.endsWith('\\')) return true;
-            const next = filePath.charAt(folder.length);
-            return next === '/' || next === '\\';
-          });
+        /** 判断文件路径是否位于某个目录枚举失败的文件夹下 */
+        const isUnderUnreadableFolder = (filePath: string): boolean =>
+          unreadableFolders.some((folder) => isUnderFolder(filePath, folder));
 
         // 4. 清理已删除文件：从 IndexedDB 移除磁盘上不存在的条目
-        // （扫描失败的文件夹跳过清理，其文件未被枚举并不代表已删除）
+        // （目录枚举失败的文件夹跳过清理，其文件未被枚举并不代表已删除）
         for (const [filePath, entry] of cachedMap) {
-          if (!diskFilePaths.has(filePath) && !isUnderFailedFolder(filePath)) {
-            await localDB.deleteData(LOCAL_MUSIC_STORE, entry.id);
+          if (diskFilePaths.has(filePath) || isUnderUnreadableFolder(filePath)) {
+            continue;
           }
+          await localDB.deleteData(LOCAL_MUSIC_STORE, entry.id);
         }
 
         // 5. 从 IndexedDB 重新加载完整列表
