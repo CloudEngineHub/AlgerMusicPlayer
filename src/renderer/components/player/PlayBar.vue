@@ -17,6 +17,7 @@
           ? '#ffffff'
           : '#000000'
     }"
+    @click="handleBarClick"
   >
     <div class="music-time custom-slider">
       <n-slider
@@ -32,7 +33,8 @@
         @dragend="handleSliderDragEnd"
       ></n-slider>
     </div>
-    <div class="play-bar-img-wrapper" @click="setMusicFull">
+    <!-- 封面与歌曲信息区域点击进入详情页，由根节点的 handleBarClick 统一处理（#751） -->
+    <div class="play-bar-img-wrapper">
       <n-image
         :src="getImgUrl(playMusic?.picUrl, '100y100')"
         class="play-bar-img"
@@ -55,7 +57,7 @@
         </div>
       </div>
     </div>
-    <div class="music-content">
+    <div class="music-content cursor-pointer">
       <div class="music-content-title flex items-center">
         <n-ellipsis class="text-ellipsis" line-clamp="1">
           <p v-html="playMusic?.name || ''"></p>
@@ -75,7 +77,7 @@
             v-for="(artists, artistsindex) in artistList"
             :key="artistsindex"
             class="cursor-pointer hover:text-green-500"
-            @click="handleArtistClick(artists.id)"
+            @click.stop="handleArtistClick(artists.id)"
           >
             {{ artists.name }}{{ artistsindex < artistList.length - 1 ? ' / ' : '' }}
           </span>
@@ -306,6 +308,20 @@ const setMusicFull = () => {
   if (musicFullVisible.value) {
     settingsStore.showArtistDrawer = false;
   }
+};
+
+/**
+ * 点击底部播放条的封面 / 歌曲信息区域也能进入（退出）详情页（#751）
+ * 采用白名单判断：只有封面容器和歌曲信息区域内的点击才触发，
+ * 进度条、播放按钮、音量与功能按钮、全屏播放器内部的点击都不会命中，
+ * 避免误触发（全屏播放器 music-full-wrapper 也渲染在播放条节点内部）
+ */
+const FULL_TRIGGER_SELECTOR = '.play-bar-img-wrapper, .music-content';
+
+const handleBarClick = (event: MouseEvent) => {
+  const target = event.target as HTMLElement | null;
+  if (!target || !target.closest(FULL_TRIGGER_SELECTOR)) return;
+  setMusicFull();
 };
 
 const openLyricWindow = () => {
