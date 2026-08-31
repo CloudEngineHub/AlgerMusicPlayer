@@ -328,6 +328,10 @@ async function handlePlayAll(): Promise<void> {
 
 // ==================== Lifecycle ====================
 onMounted(async () => {
+  // 启动时的自动扫描可能仍在进行，此时不要用缓存快照覆盖扫描结果
+  if (localMusicStore.scanning) {
+    return;
+  }
   // 进入页面时从 IndexedDB 缓存加载音乐列表
   await localMusicStore.loadFromCache();
 });
