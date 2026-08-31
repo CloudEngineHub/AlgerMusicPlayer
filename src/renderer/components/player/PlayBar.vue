@@ -33,7 +33,7 @@
         @dragend="handleSliderDragEnd"
       ></n-slider>
     </div>
-    <!-- 封面与歌曲信息区域点击进入详情页，由根节点的 handleBarClick 统一处理（#751） -->
+    <!-- 播放条空白区域点击进入详情页，由根节点的 handleBarClick 统一处理（#751） -->
     <div class="play-bar-img-wrapper">
       <n-image
         :src="getImgUrl(playMusic?.picUrl, '100y100')"
@@ -57,7 +57,7 @@
         </div>
       </div>
     </div>
-    <div class="music-content cursor-pointer">
+    <div class="music-content">
       <div class="music-content-title flex items-center">
         <n-ellipsis class="text-ellipsis" line-clamp="1">
           <p v-html="playMusic?.name || ''"></p>
@@ -311,16 +311,21 @@ const setMusicFull = () => {
 };
 
 /**
- * 点击底部播放条的封面 / 歌曲信息区域也能进入（退出）详情页（#751）
- * 采用白名单判断：只有封面容器和歌曲信息区域内的点击才触发，
- * 进度条、播放按钮、音量与功能按钮、全屏播放器内部的点击都不会命中，
- * 避免误触发（全屏播放器 music-full-wrapper 也渲染在播放条节点内部）
+ * 点击底部播放条的任意空白区域都能进入（退出）详情页（#751）
+ * 只排除真正的交互控件，其余位置（封面、歌曲信息、按钮之间的空白）都可点击。
+ * 全屏播放器由 n-drawer teleport 到 #layout-main，不在播放条节点内，无需额外排除。
  */
-const FULL_TRIGGER_SELECTOR = '.play-bar-img-wrapper, .music-content';
+const IGNORE_FULL_TRIGGER_SELECTOR = [
+  '.music-time', // 进度条（绝对定位覆盖播放条顶边）
+  '.music-buttons-prev',
+  '.music-buttons-play',
+  '.music-buttons-next',
+  '.audio-button' // 音量、播放模式、收藏、歌词、下载、更多、播放列表
+].join(', ');
 
 const handleBarClick = (event: MouseEvent) => {
   const target = event.target as HTMLElement | null;
-  if (!target || !target.closest(FULL_TRIGGER_SELECTOR)) return;
+  if (!target || target.closest(IGNORE_FULL_TRIGGER_SELECTOR)) return;
   setMusicFull();
 };
 
@@ -350,6 +355,12 @@ const openPlayListDrawer = () => {
   @apply bg-light dark:bg-dark shadow-2xl shadow-gray-300;
   z-index: 9999;
   animation-duration: 0.5s !important;
+  /* 空白区域可点击展开详情页（#751） */
+  cursor: pointer;
+
+  .music-time {
+    cursor: default;
+  }
 
   &.play-bar-opcity {
     @apply bg-transparent !important;
