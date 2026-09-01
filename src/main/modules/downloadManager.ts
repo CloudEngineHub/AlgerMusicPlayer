@@ -92,6 +92,10 @@ class DownloadManager {
   private mainWindow: BrowserWindow | null = null;
   private progressThrottles: Map<string, number> = new Map();
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 单曲下载完成通知的合并队列（#703：连续下载时不再一首弹一条） */
+  private pendingCompletions: Array<{ title: string; filePath: string }> = [];
+  private completionNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+  private completionNoticeDeadline: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     this.persistStore = new Store<DownloadQueueStore>({
@@ -882,20 +886,11 @@ class DownloadManager {
         }
       }
     } else {
-      // Individual notification
-      try {
-        const notification = new Notification({
-          title: '下载完成',
-          body: `${task.songInfo?.name || task.filename} - ${artistNames}`,
-          silent: false
-        });
-        notification.on('click', () => {
-          shell.showItemInFolder(finalFilePath);
-        });
-        notification.show();
-      } catch (e) {
-        console.error('Failed to send notification:', e);
-      }
+      // 单曲下载完成：进入合并队列，短时间内的多首只弹一条汇总通知（#703）
+      this.queueCompletionNotice(
+        `${task.songInfo?.name || task.filename} - ${artistNames}`,
+        finalFilePath
+      );
     }
 
     // Remove completed task from active tasks and persist
@@ -934,6 +929,68 @@ class DownloadManager {
       };
       this.sendToRenderer('download:batch-complete', batchEvent);
       this.batchTracker.delete(task.batchId);
+    }
+  }
+
+  // ─── Completion notification coalescing (#703) ─────────────────
+
+  /** 收集完成通知的静默窗口：窗口内再有歌曲完成就继续等待，避免一首一条 */
+  private static readonly COMPLETION_NOTICE_DEBOUNCE = 1500;
+  /** 最长等待时间：持续下载时也要保证通知能发出去 */
+  private static readonly COMPLETION_NOTICE_MAX_WAIT = 8000;
+
+  /**
+   * 把一条"单曲下载完成"通知放进合并队列。
+   * 连续下载多首时只在队列静默后弹一条汇总通知（#703 下载完通知过多）
+   */
+  private queueCompletionNotice(title: string, filePath: string): void {
+    this.pendingCompletions.push({ title, filePath });
+
+    if (this.completionNoticeTimer) {
+      clearTimeout(this.completionNoticeTimer);
+    }
+    this.completionNoticeTimer = setTimeout(
+      () => this.flushCompletionNotice(),
+      DownloadManager.COMPLETION_NOTICE_DEBOUNCE
+    );
+
+    // 首条进入队列时启动兜底定时器，防止下载不断时通知被无限推迟
+    if (!this.completionNoticeDeadline) {
+      this.completionNoticeDeadline = setTimeout(
+        () => this.flushCompletionNotice(),
+        DownloadManager.COMPLETION_NOTICE_MAX_WAIT
+      );
+    }
+  }
+
+  /** 弹出合并后的下载完成通知并清空队列 */
+  private flushCompletionNotice(): void {
+    if (this.completionNoticeTimer) {
+      clearTimeout(this.completionNoticeTimer);
+      this.completionNoticeTimer = null;
+    }
+    if (this.completionNoticeDeadline) {
+      clearTimeout(this.completionNoticeDeadline);
+      this.completionNoticeDeadline = null;
+    }
+
+    const items = this.pendingCompletions;
+    this.pendingCompletions = [];
+    if (items.length === 0) return;
+
+    const last = items[items.length - 1];
+    try {
+      const notification = new Notification({
+        title: '下载完成',
+        body: items.length === 1 ? last.title : `共 ${items.length} 首歌曲下载完成`,
+        silent: false
+      });
+      notification.on('click', () => {
+        shell.showItemInFolder(last.filePath);
+      });
+      notification.show();
+    } catch (e) {
+      console.error('Failed to send notification:', e);
     }
   }
 
